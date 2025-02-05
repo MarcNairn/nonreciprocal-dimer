@@ -131,13 +131,13 @@ Below we study the full system with two distinct spin species and species depend
 """
 
 # Define the parameters
-
+δ = 0.0
 Δ = 1.0
-Δ0 = 1.0
-Δ1 = 1.0
-g = 0.5
+Δ0 = 1.0 + δ
+Δ1 = 1.0 - δ
+g = 2.0
 κ = 10.0
-Γ_T = 0.5
+Γ_T = 1.0
 
 function compute_M(σz, ϕ) 
     χR = 1/(im*Δ-κ/2)
@@ -155,7 +155,7 @@ function compute_M(σz, ϕ)
 end 
 
 # Range of σ^z_{ns} values
-Γ_uprange = range(0, stop=1, length=100)
+Γ_uprange = range(0, stop=1, length=1000)
 σz_ns_values = (Γ_uprange .- (1 .- Γ_uprange)) ./ (Γ_uprange .+ (1 .- Γ_uprange))
 
 # Range of φ values
@@ -171,23 +171,34 @@ positive_real_parts = [sum(real_parts .> 0, dims=1)']
 
 
 
-eigenvalues_phi = [eigen(compute_M(-0.1, φ)).values for φ in φ_values]
+eigenvalues_phi = [eigen(compute_M(0.15, φ)).values for φ in φ_values]
 
-eigenvalues_sz = [eigen(compute_M(σz, π/6)).values for σz in σz_ns_values]
 
 real_parts = hcat([real.(eig) for eig in eigenvalues_phi]...)
 im_parts = hcat([imag.(eig) for eig in eigenvalues_phi]...)
 
-real_parts = hcat([real.(eig) for eig in eigenvalues_sz]...)
-im_parts = hcat([imag.(eig) for eig in eigenvalues_sz]...)
-
-plot(Γ_uprange, real_parts', xlabel=L"\Gamma_\uparrow/\Gamma_T", ylabel=L"\Re(\lambda)", linewidth=3, xticks=(:auto), label=[L"\Re(\lambda_+)" L"\Re(\lambda_-)"])
-
-
-plot(φ_values, real_parts', xlabel=L"\varphi", ylabel=L"\Re(\lambda)", legend=false, linewidth=3 , xticks=([-π/2, 0, π/2], [L"-\pi/2", L"0", L"\pi/2"]), ylims=(-0.01,0.01))
+plot(φ_values, real_parts', xlabel=L"\varphi", ylabel=L"\Re(\lambda)", legend=false, linewidth=3 , xticks=([-π/2, 0, π/2], [L"-\pi/2", L"0", L"\pi/2"]))
 plot!(φ_values, im_parts', linewidth=3)
 
+function count_eigenreals(eigenlist)
+    no_eigenreals1 = []
+    no_eigenreals2 = []
+    for entry in 1:Int(length(eigenlist)/2)
+        if eigenlist[1,entry] > 1e-8 
+            push!(no_eigenreals1, 1)
+        else
+            push!(no_eigenreals1, 0)
+        end
+        if eigenlist[2,entry] > 1e-8
+            push!(no_eigenreals2, 1)
+        else   
+            push!(no_eigenreals2, 0)
+        end
+    end
+    no_eigenreals = no_eigenreals1 .+ no_eigenreals2
+    return no_eigenreals
+    end
 
-sumreals1 = sum(real_parts .> 0, dims=1)
-sumreals2 = sum(real_parts .> 0, dims=2)
 
+
+heatmap(φ_values./π, Γ_uprange, reshape(count_eigenreals(real_parts)', length(Γ_uprange), :), xlabel=L"\varphi/\pi", ylabel=L"\Gamma_\uparrow/\Gamma_T", colormap = :blues)
