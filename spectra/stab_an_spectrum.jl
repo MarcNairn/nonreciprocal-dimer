@@ -149,7 +149,7 @@ function compute_M(σz, ϕ)
     M = 
     [
        -im*Δ - Γ_T/2 + χ*σz  ξ₊*σz
-       -im*Δ - Γ_T/2 + χ*σz ξ₋*σz
+        ξ₋*σz -im*Δ - Γ_T/2 + χ*σz
     ]
     return M
 end 
