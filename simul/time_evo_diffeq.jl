@@ -6,7 +6,7 @@ using Statistics
 using ProgressMeter
 using PyCall
 using FFTW
-
+using DelimitedFiles
 
 PyPlot.pygui(false)
 println(PyCall.python)
@@ -32,25 +32,6 @@ PyPlot.svg(true)
 # LaTeX preamble packages
 PyPlot.matplotlib[:rc]("text.latex", preamble="\\usepackage{amsmath}\\usepackage{amsfonts}\\usepackage{amssymb}\\usepackage{lmodern}")
 
-# function spin_ode!(du, u, p, t)
-#     s1x, s2x, s1y, s2y, s1z, s2z, α_r, α_i = u
-#     Δ1, Δ2, Δ, g, φ, κ, η = p
-
-#     # Equations for spin 1
-#     du[1] = Δ1 * s1y - g * s1z * α_i            # ds1x/dt
-#     du[3] = -Δ1 * s1x - g * s1z * α_r            # ds1y/dt
-#     du[5] = g * (s1x * α_i + s1y * α_r)          # ds1z/dt
-
-#     # Equations for spin 2
-#     du[2] = Δ2 * s2y - g * s2z * (sin(φ)*α_r + cos(φ)*α_i)  # ds2x/dt
-#     du[4] = -Δ2 * s2x - g * s2z * (cos(φ)*α_r - sin(φ)*α_i) # ds2y/dt
-#     du[6] = g * (s2x*(cos(φ)*α_i + sin(φ)*α_r) + s2y*(cos(φ)*α_r - sin(φ)*α_i)) # ds2z/dt
-
-#     # Cavity field equations
-#     du[7] = -Δ*α_i - (κ/2)*α_r - g*(sin(φ)*s2x - g*s1y - g*cos(φ)*s2y) + 2η  # dα_r/dt
-#     du[8] = Δ*α_r - (κ/2)*α_i - g*s1x - g*cos(φ)*s2x + g*sin(φ)*s2y # dα_i/dt
-#     return nothing
-# end
 
 """ 
 #############################################################
@@ -61,14 +42,14 @@ PyPlot.matplotlib[:rc]("text.latex", preamble="\\usepackage{amsmath}\\usepackage
 """
 
 
-function compute_time_average(sol::Vector{Vector{Float64}}, variable_index::Int)
+function compute_time_average(sol::ODESolution{}, variable_index::Int)
     """  
     ###################
     Compute time average of an ODE sol object using portion of data, requires indexed variables 
     ################### 
     """
     t = sol.t
-    t_mid = 5*t[end]/10
+    t_mid = 0.6*t[end]
     indices = findall(x -> x >= t_mid, t)
     vals = sol[variable_index, indices]
     return mean(vals), var(vals)
@@ -81,16 +62,52 @@ function compute_time_average(t::Vector{Float64}, series::Vector{Float64})
     Compute time average of a generic series using portion of data, no indexing required
     ################### 
     """
-    t_mid = 0.5 * maximum(t)
+    t_mid = 0.6 * maximum(t)
     indices = findall(x -> x >= t_mid, t)
     return mean(series[indices])
 end
 
 """
 ################################
-SPIN ONLY DYNAMICS 
+DYNAMICS 
 ################################
 """
+
+function spin_cav_ode!(du, u, p, t)
+    s1x, s2x, s1y, s2y, s1z, s2z, α_r, α_i = u
+    Δ1, Δ2, Δ, g, φ, κ, η = p
+
+    # Equations for spin 1
+    du[1] = Δ1 * s1y - 2*g * s1z * α_i            # ds1x/dt
+    du[3] = -Δ1 * s1x - 2*g * s1z * α_r            # ds1y/dt
+    du[5] = 2g * (s1x * α_i + s1y * α_r)          # ds1z/dt
+
+    # Equations for spin 2
+    du[2] = Δ2 * s2y - 2g * s2z * (sin(φ)*α_r + cos(φ)*α_i)  # ds2x/dt
+    du[4] = -Δ2 * s2x   - 2g * s2z * (cos(φ)*α_r - sin(φ)*α_i) # ds2y/dt
+    du[6] = 2g * (s2x*(cos(φ)*α_i + sin(φ)*α_r) + s2y*(cos(φ)*α_r - sin(φ)*α_i)) # ds2z/dt
+
+    # Cavity field equations
+    du[7] = -Δ*α_i - (κ/2)*α_r - g/2*(s1y +  cos(φ)*(s2y + s2x)) + η  # dα_r/dt
+    du[8] = Δ*α_r - (κ/2)*α_i - g/2*(s1x - sin(φ)*(s2y + s2x)) # dα_i/dt
+    return nothing
+end
+
+
+function single_spin_cav_ode!(du, u, p, t)
+    s1x, s1y, s1z, α_r, α_i = u
+    Δ1, Δ2, Δ, g, φ, κ, η = p
+
+    # Equations for spin 1
+    du[1] = Δ1 * s1y - 2*g * s1z * α_i            # ds1x/dt
+    du[2] = -Δ1 * s1x - 2*g * s1z * α_r            # ds1y/dt
+    du[3] = 2g * (s1x * α_i + s1y * α_r)          # ds1z/dt
+
+    # Cavity field equations
+    du[4] = -Δ*α_i - (κ/2)*α_r - g/2*s1y + η  # dα_r/dt
+    du[5] = Δ*α_r - (κ/2)*α_i - g/2*s1x  # dα_i/dt
+    return nothing
+end
 
 function spinonly_ode!(du, u, p, t)
     s1x, s2x, s1y, s2y, s1z, s2z = u
@@ -387,39 +404,113 @@ RADIANCE WITNESS
 ############################
 """
 
-function compute_R(p::NamedTuple, u0_two,u0_one, tspan)
+function compute_R(p::NamedTuple, adaga0::Int64, u0_two:: Vector{Float64}, u0_one:: Vector{Float64}, tspan::Float64, w_cavity::Bool)
     K = p.κ / 2
     denominator = im * p.Δ - K
     # For two spins
 
-    prob_two = ODEProblem(spinonly_ode!, u0_two, tspan, p)
-    sol_two = solve(prob_two, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
+    if w_cavity==true
+        u0_two = [u0_two..., sqrt(adaga0/2), sqrt(adaga0/2)]
+        u0_one = [u0_one..., sqrt(adaga0/2), sqrt(adaga0/2)]
+        prob_two = ODEProblem(spin_cav_ode!, u0_two, tspan, p)
+        prob_one = ODEProblem(single_spin_cav_ode!, u0_one, tspan, p)
+        sol_two = solve(prob_two, Tsit5(), saveat=tspan/100, maxiters=1e9, abstol=1e-9, reltol=1e-9)
+        sol_one = solve(prob_one, Tsit5(), saveat=tspan/100, maxiters=1e9, abstol=1e-9, reltol=1e-9)
 
-    s1x_two = sol_two[1, :]
-    s2x_two = sol_two[2, :]
-    s1y_two = sol_two[3, :]
-    s2y_two = sol_two[4, :]
+        # For two spins
+        a_two = sol_two[7, :] .+ im * sol_two[8, :]
+        adaga_two = abs2.(a_two)
+        avg_two = compute_time_average(sol_two.t, adaga_two)
 
-    a_two = @. ( ( g/2 * (im*(s1x_two + exp(-im*φ)*s2x_two) + (s1y_two + exp(-im*φ)*s2y_two)) - η ) / denominator )
-    adaga_two = abs2.(a_two)
-    avg_two = compute_time_average(sol_two.t, adaga_two)
-
-    # For one spin
-    prob_one = ODEProblem(single_spinonly_ode!, u0_one, tspan, p)
-    sol_one = solve(prob_one, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
-
-    s1x_one = sol_one[1, :]
-    s1y_one = sol_one[2, :]
-
-    a_one = @. ( (g/2 * ((im*s1x_one + s1y_one)) - η ) / denominator )
-    adaga_one = abs2.(a_one)
-    avg_one = compute_time_average(sol_one.t, adaga_one)
-
+        # For one spin
+        a_one = sol_one[4, :] .+ im * sol_one[5, :]
+        adaga_one = abs2.(a_one)
+        avg_one = compute_time_average(sol_one.t, adaga_one)
+    else
+        prob_two = ODEProblem(spinonly_ode!, u0_two, tspan, p)
+        prob_one = ODEProblem(single_spinonly_ode!, u0_one, tspan, p)
+        sol_two = solve(prob_two, Tsit5(), saveat=tspan/100,maxiters=1e9, abstol=1e-9, reltol=1e-9)
+        sol_one = solve(prob_one, Tsit5(), saveat=tspan/100, maxiters=1e9, abstol=1e-9, reltol=1e-9)
+        
+        # For two spins
+        s1x_two = sol_two[1, :]
+        s2x_two = sol_two[2, :]
+        s1y_two = sol_two[3, :]
+        s2y_two = sol_two[4, :]
+    
+        a_two = @. ( ( g/2 * (im*(s1x_two + exp(-im*φ)*s2x_two) + (s1y_two + exp(-im*φ)*s2y_two)) - η ) / denominator )
+        adaga_two = abs2.(a_two)
+        avg_two = compute_time_average(sol_two.t, adaga_two)
+    
+        # For one spin    
+        s1x_one = sol_one[1, :]
+        s1y_one = sol_one[2, :]
+    
+        a_one = @. ( (g/2 * ((im*s1x_one + s1y_one)) - η ) / denominator )
+        adaga_one = abs2.(a_one)
+        avg_one = compute_time_average(sol_one.t, adaga_one)
+    end
     # Compute R
     R = (avg_two - 2 * avg_one) / (2 * avg_one)
     return R
 end
 
+
+# function compute_R(p::NamedTuple, u0_two, u0_one, tspan, w_cavity::Bool)
+#     K = p.κ / 2
+#     denominator = im * p.Δ - K
+    
+#     if w_cavity
+#         # Handle cavity case with extended initial conditions
+#         avg_two = _solve_cavity_case(spin_cav_ode!, vcat(u0_two, [sqrt(0.5), sqrt(0.5)]), p, tspan)
+#         avg_one = _solve_cavity_case(single_spin_cav_ode!, vcat(u0_one, [sqrt(0.5), sqrt(0.5)]), p, tspan)
+#     else
+#         # Precompute common terms for spin-only case 
+#         g_2 = p.g / 2
+#         φ_term = exp(-im * p.φ)
+#         pre_g = g_2 / denominator
+#         pre_η = p.η / denominator
+        
+#         # Solve spin-only cases
+#         avg_two = _solve_spin_case(spinonly_ode!, u0_two, p, tspan, pre_g, pre_η, φ_term, true)
+#         avg_one = _solve_spin_case(single_spinonly_ode!, u0_one, p, tspan, pre_g, pre_η, φ_term, false)
+#     end
+    
+#     # Calculate final result
+#     R = (avg_two - 2 * avg_one) / (2 * avg_one)
+#     return R
+# end
+
+# # Helper function for cavity case calculations
+# function _solve_cavity_case(ode_func, u0, p, tspan)
+#     prob = ODEProblem(ode_func, u0, tspan, p)
+#     sol = solve(prob, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
+
+#     # Dynamically find cavity field indices (last two elements)
+#     cavity_real_idx = length(u0) - 1
+#     cavity_imag_idx = length(u0)
+    
+#     @views a = sol[cavity_real_idx, :] .+ im .* sol[cavity_imag_idx, :]
+#     return compute_time_average(sol.t, abs2.(a))
+# end
+
+# # Helper function for spin-only case calculations
+# function _solve_spin_case(ode_func, u0, p, tspan, pre_g, pre_η, φ_term, is_two_spin)
+#     prob = ODEProblem(ode_func, u0, tspan, p)
+#     sol = solve(prob, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
+    
+#     @views begin
+#         if is_two_spin
+#             s1x, s2x, s1y, s2y = sol[1,:], sol[2,:], sol[3,:], sol[4,:]
+#             a = pre_g .* (im .* (s1x .+ φ_term .* s2x) .+ (s1y .+ φ_term .* s2y)) .- pre_η
+#         else
+#             s1x, s1y = sol[1,:], sol[2,:]
+#             a = pre_g .* (im .* s1x .+ s1y) .- pre_η
+#         end
+#     end
+    
+#     return compute_time_average(sol.t, abs2.(a))
+# end
 
 """
 ############################################
@@ -431,31 +522,126 @@ MAIN SCRIPT (NUMERICS)
 Δ1 = 0
 Δ2 = 0
 Δ = 0
-g = 0.1
+g = 0.5
 κ = 1.0
 φ_range = range(-π/2, π/2, 101)     # φ (x-axis)
 η_range = range(0.5*g, 1.5*g, 101)  # η (y-axis)
-
-
 # Generate phase diagram
 φ_vals, η_vals, s1z_avg, s2z_avg, s1z_vrc, s2z_vrc = sz_phase_diagram(Δ1, Δ2, Δ, g, κ, φ_range, η_range)
 
 
-# Parameters for testing
+#### Benchmarking single and cuopled spin, with and without cavity 
+
+
 Δ1 = 0
 Δ2 = 0
-Δ = 0
-g = 0.1
+Δ = 0 
 κ = 1.0
-φ = 0#  pi/8
-η = 0.9*g
-u0 = [0.0, 0.0, 0.0, 0.0, -1.0, -1.0]
-t_end = 100000*g  # Reduced for testing
+g = 0.5κ
+φ = 0
+η = g
+t_end = 1000/κ
+p = (Δ1=Δ1, Δ2=Δ2, Δ=Δ, g=g, φ=φ, κ=κ, η=η)
+saveat = t_end/1000
 
-# Solve the system
-p = (Δ1, Δ2, Δ, g, φ, κ, η)
-prob = ODEProblem(spinonly_ode!, u0, (0.0, t_end), p)
-sol = solve(prob, Tsit5(), saveat=0.1, abstol=1e-8, reltol=1e-8)
+u0c_coupled=[0.0, 0.0, 0.0, 0.0, -1.0, -1.0, 0, 0]
+u0s_coupled=[0.0, 0.0, 0.0, 0.0, -1.0, -1.0]
+u0c_single=[0.0, 0.0, -1.0, 0, 0]
+u0s_single=[0.0, 0.0, -1.0]
+
+function spin_cav_dyns(p::NamedTuple,t_end, saveat, u0c_coupled,u0s_coupled,u0c_single,u0s_single,
+    maxiters=1e9, reltol=1e-9, abstol=1e-9)
+
+    # Precompute terms used in post-processing
+    K = p.κ / 2
+    denominator = im * p.Δ - K
+    pre_g = (p.g / 2) / denominator
+    pre_η = p.η / denominator
+    φ_term = exp(-im * p.φ)
+
+    # Common solver options
+    solver_opts = (maxiters=maxiters, reltol=reltol, abstol=abstol)
+
+    # 1. Coupled Spins WITH Cavity
+    prob_cav_coupled = ODEProblem(spin_cav_ode!, u0c_coupled, (0.0, t_end), p)
+    sol_cav_coupled = solve(prob_cav_coupled, Tsit5(); saveat=saveat, solver_opts...)
+
+    # 2. Coupled Spins WITHOUT Cavity
+    prob_spin_coupled = ODEProblem(spinonly_ode!, u0s_coupled, (0.0, t_end), p)
+    sol_spin_coupled = solve(prob_spin_coupled, Tsit5(); saveat=saveat, solver_opts...)
+
+    # 3. Single Spin WITH Cavity
+    prob_cav_single = ODEProblem(single_spin_cav_ode!, u0c_single, (0.0, t_end), p)
+    sol_cav_single = solve(prob_cav_single, Tsit5(); saveat=saveat, solver_opts...)
+
+    # 4. Single Spin WITHOUT Cavity
+    prob_spin_single = ODEProblem(single_spinonly_ode!, u0s_single, (0.0, t_end), p)
+    sol_spin_single = solve(prob_spin_single, Tsit5(); saveat=saveat, solver_opts...)
+
+    # Calculate |a|² for all cases
+    abs2_cav_coupled = abs2.(sol_cav_coupled[7,:] .+ im.*sol_cav_coupled[8,:])
+
+    s1x, s2x = sol_spin_coupled[1,:], sol_spin_coupled[2,:]
+    s1y, s2y = sol_spin_coupled[3,:], sol_spin_coupled[4,:]
+    abs2_spin_coupled = abs2.(pre_g .* (im.*(s1x .+ φ_term.*s2x) .+ (s1y .+ φ_term.*s2y)) .- pre_η)
+
+    abs2_cav_single = abs2.(sol_cav_single[4,:] .+ im.*sol_cav_single[5,:])
+
+    s1x, s1y = sol_spin_single[1,:], sol_spin_single[2,:]
+    abs2_spin_single = abs2.(pre_g .* (im.*s1x .+ s1y) .- pre_η)
+
+    avg_twoc = compute_time_average(sol_spin_coupled.t, abs2_cav_coupled)
+    avg_onec = compute_time_average(sol_spin_single.t, abs2_cav_single)
+    R_cav = ( avg_twoc- 2 * avg_onec) / (2 * avg_onec)
+
+    avg_twos = compute_time_average(sol_spin_coupled.t, abs2_spin_coupled)
+    avg_ones = compute_time_average(sol_spin_single.t, abs2_spin_single)
+    R_spin = ( avg_twos- 2 * avg_ones) / (2 * avg_ones)
+
+
+    R_cav_str = string(round(R_cav, digits=3))
+    R_spin_str = string(round(R_spin, digits=3))
+    # Create plot
+    fig = figure(figsize=(8,5))
+    t_points = sol_cav_coupled.t
+
+    plot(t_points, abs2_cav_coupled, lw=2.5, color="dodgerblue", label="Coupled spins (with cavity)")
+    #plot(t_points, abs2_spin_coupled, lw=2.5, color="dodgerblue", linestyle="--", label="Coupled spins (spin-only)")
+    plot(t_points, abs2_cav_single, lw=2.5, color="crimson", label="Single spin (with cavity)")
+    #plot(t_points, abs2_spin_single, lw=2.5, color="crimson", linestyle="--", label="Single spin (spin-only)")
+
+    anon1 = annotate(L"$\mathcal{R}_c = " * R_cav_str * L"$", 
+    (0.5, 0.7), 
+    xycoords="axes fraction",
+    fontsize=18,
+    color="black")
+
+    anon2 = annotate(L"$\mathcal{R}_s = " * R_spin_str * L"$", 
+    (0.5, 0.6), 
+    xycoords="axes fraction",
+    fontsize=18,
+    color="black")
+
+    xlabel(L"Time (1/$\kappa$)")
+    ylabel(L"|\alpha|^2")
+    legend()
+    grid(true)
+    tight_layout()
+
+    return fig
+end
+
+fig = spin_cav_dyns(p, t_end, saveat, u0c_coupled,u0s_coupled,u0c_single,u0s_single)
+
+
+compute_time_average(sol_cav_coupled.t, abs2_cav_coupled)
+compute_time_average(sol_spin_coupled.t, abs2_spin_coupled)
+
+avg_two = compute_time_average(sol_spin_coupled.t, abs2_cav_coupled)
+avg_one = compute_time_average(sol_spin_single.t,  abs2_cav_single)
+
+R = (avg_two - 2 * avg_one) / (2 * avg_one)
+
 
 # Extract time series (using second half)
 t = sol.t
@@ -468,6 +654,8 @@ signal2 = sol[6, :]
 Δt = t[2] - t[1]
 freqs1, power1 = compute_fft_spectrum(signal1, Δt)
 freqs2, power2 = compute_fft_spectrum(signal2, Δt)
+
+fig = plot_time_and_freq_spectrum(t, signal1, freqs1, power1, signal2, freqs2, power2, g)
 
 function plot_time_and_freq_spectrum(t, signal1, freqs1, power1, signal2, freqs2, power2, g)
     fig = figure(figsize=(12, 8))
@@ -506,25 +694,28 @@ end
 
 
 
-φ_range = range(-pi, pi, length=101)
-η_range = range(0.0*g, 1.5*g, length=101)  
-s1z_peaks, s2z_peaks = frequency_phase_diagram(φ_range, η_range,g, κ)
-savefig("spectrum.pdf")
+# φ_range = range(-pi, pi, length=101)
+# η_range = range(0.0*g, 1.5*g, length=101)  
+# s1z_peaks, s2z_peaks = frequency_phase_diagram(φ_range, η_range,g, κ)
+# savefig("spectrum.pdf")
 
 
-
-
-
-Δ1 = 0.05
-Δ2 = -0.05
-g = 0.5
+Δ1 = 0
+Δ2 = 0
+Δ = 0 
+κ = 1.0
+g = 0.5κ
+φ = 0
+η = κ
 
 u0_two = [0.0, 0.0, 0.0, 0.0, -1.0, -1.0]
 u0_one = [0.0, 0.0, -1.0]
 p = (Δ1=Δ1, Δ2=Δ2, Δ=Δ, g=g, φ=φ, κ=κ, η=η)
-R= compute_R(p, u0_two, u0_one, 1000000.0*p.g)
 
+R = compute_R(p, 1, u0_two, u0_one, 100.0/κ, false)
 
+φ_range = range(0, 2*pi, length=30)
+η_range = range(0.1*g, 100*g, length=30)  
 total_iterations = length(φ_range) * length(η_range)
 prog = Progress(total_iterations, 1, "Computing R grid: ", 50)
 R_grid = zeros(length(φ_range), length(η_range));
@@ -533,23 +724,167 @@ for (i, φ) in enumerate(φ_range)
         # Create new parameter set with current phi and eta
         current_p = merge(p,(φ=φ, η=η))
         # Compute R for this parameter set
-        R = compute_R(current_p, u0_two, u0_one, 50000.0*current_p.g)
+        R = compute_R(current_p, 0, u0_two, u0_one, 5000.0/κ, true)
         R_grid[i, j] = R
 
         next!(prog)
     end
 end
 
-fig = figure(figsize=(8, 6));
+
+fig = figure(figsize=(8, 6));   
 ax = gca();
-extent = [minimum(φ_range), maximum(φ_range), minimum(η_range)/g, maximum(η_range)/g];
+extent = [minimum(φ_range)/pi, maximum(φ_range)/pi, minimum(η_range)/g, maximum(η_range)/g];
 # Create the image plot with proper extent
-img_plot = ax.imshow(R_grid', extent=extent,origin="lower",aspect="auto",cmap=balance, vmin=-1, vmax=2);
+img_plot = ax.imshow(R_grid', extent=extent,origin="lower",aspect="auto",cmap=lajolla.reversed());
 # Add colorbar
 cbar = colorbar(img_plot, ax=ax);
 cbar.set_label(L"\mathcal{R}");
 
 # Set labels and title
+semilogy()
+xlabel(L"\varphi")
+ylabel(L"\eta/g")
+tight_layout()
+display(fig)
+
+# open("R.dat", "w") do f
+#     writedlm(f, R_grid)
+# end
+
+# open("R_wdetns.dat", "w") do f
+#     writedlm(f, R_grid)
+# end
+
+# R_grid = readdlm("R.dat");
+# R_grid = readdlm("R_wdetns.dat");
+
+
+
+"""
+
+####################################
+PRECOMPUTED EVALUATION / INTEGRAL EVAL (IN PROGRESS)
+####################################
+
+""" 
+
+# First, ensure trapezoidal integration is available
+function trapz(t::AbstractVector, y::AbstractVector)
+    integral = 0.0
+    for i in 2:length(t)
+        dt = t[i] - t[i-1]
+        integral += (y[i] + y[i-1]) * dt / 2
+    end
+    return integral
+end
+
+# Modified helper functions to return time integrals instead of averages
+function _solve_cavity_case_integral(ode_func, u0, p, tspan)
+    prob = ODEProblem(ode_func, u0, tspan, p)
+    sol = solve(prob, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
+    
+    cavity_real_idx = length(u0) - 1
+    cavity_imag_idx = length(u0)
+    
+    @views a = sol[cavity_real_idx, :] .+ im .* sol[cavity_imag_idx, :]
+    return trapz(sol.t, abs2.(a))  # Return full time integral
+end
+
+function _solve_spin_case_integral(ode_func, u0, p, tspan, pre_g, pre_η, φ_term, is_two_spin)
+    prob = ODEProblem(ode_func, u0, tspan, p)
+    sol = solve(prob, Tsit5(), saveat=0.1, abstol=1e-9, reltol=1e-9)
+    
+    @views begin
+        if is_two_spin
+            s1x, s2x, s1y, s2y = sol[1,:], sol[2,:], sol[3,:], sol[4,:]
+            a = pre_g .* (im .* (s1x .+ φ_term .* s2x) .+ (s1y .+ φ_term .* s2y)) .- pre_η
+        else
+            s1x, s1y = sol[1,:], sol[2,:]
+            a = pre_g .* (im .* s1x .+ s1y) .- pre_η
+        end
+    end
+    
+    return trapz(sol.t, abs2.(a))  # Return full time integral
+end
+
+# New functions to compute time integrals
+function compute_integral_one(p::NamedTuple, u0_one, tspan, w_cavity::Bool)
+    if w_cavity
+        return _solve_cavity_case_integral(single_spin_cav_ode!, vcat(u0_one, [0.0, 0.0]), p, tspan)
+    else
+        K = p.κ / 2
+        denominator = im * p.Δ - K
+        g_2 = p.g / 2
+        pre_g = g_2 / denominator
+        pre_η = p.η / denominator
+        return _solve_spin_case_integral(single_spinonly_ode!, u0_one, p, tspan, pre_g, pre_η, 0.0, false)
+    end
+end
+
+function compute_integral_two(p::NamedTuple, u0_two, tspan, w_cavity::Bool)
+    if w_cavity
+        return _solve_cavity_case_integral(spin_cav_ode!, vcat(u0_two, [0.0, 0.0]), p, tspan)
+    else
+        K = p.κ / 2
+        denominator = im * p.Δ - K
+        g_2 = p.g / 2
+        pre_g = g_2 / denominator
+        pre_η = p.η / denominator
+        φ_term = exp(-im * p.φ)
+        return _solve_spin_case_integral(spinonly_ode!, u0_two, p, tspan, pre_g, pre_η, φ_term, true)
+    end
+end
+
+# Main computation
+function compute_NCC_integrated(integral_two::Float64, integral_one::Float64; epsilon=1e-12)
+    numerator = integral_two - 2 * integral_one
+    denominator = integral_two + 2 * integral_one + epsilon
+    return numerator / denominator
+end
+
+# Parameter setup remains the same
+Δ1 = 0
+Δ2 = 0
+Δ = 0 
+g = 0.5*κ
+κ = 1.0
+φ = 0
+η = 1
+
+u0_two = [0.0, 0.0, 0.0, 0.0, -1.0, -1.0]
+u0_one = [0.0, 0.0, -1.0]
+p = (Δ1=Δ1, Δ2=Δ2, Δ=Δ, g=g, φ=φ, κ=κ, η=η)
+
+φ_range = range(-pi, pi, length=101)
+η_range = range(g, 10*g, length=101)
+tspan = (0.0, 500.0/κ)  # Full time range for integration
+w_cavity = true  # Set based on your configuration
+
+# Precompute single-spin integrals for each η
+integral_one_vec = zeros(length(η_range))
+@showprogress "Precomputing single-spin integrals..." for (j, η) in enumerate(η_range)
+    current_p = merge(p, (η=η, φ=0.0))  # φ irrelevant for single-spin case
+    integral_one_vec[j] = compute_integral_one(current_p, u0_one, tspan, w_cavity)
+end
+
+# Compute full NCC integrated grid
+NCC_integrated_grid = zeros(length(φ_range), length(η_range))
+@showprogress "Computing integrated NCC..." for (i, φ) in enumerate(φ_range)
+    for (j, η) in enumerate(η_range)
+        current_p = merge(p, (φ=φ, η=η))
+        integral_two = compute_integral_two(current_p, u0_two, tspan, w_cavity)
+        NCC_integrated_grid[i, j] = compute_NCC_integrated(integral_two, integral_one_vec[j])
+    end
+end
+
+# Plot the integrated NCC grid
+fig = figure(figsize=(8, 6))
+ax = gca()
+extent = [minimum(φ_range), maximum(φ_range), minimum(η_range)/g, maximum(η_range)/g]
+img_plot = ax.imshow(NCC_integrated_grid', extent=extent, origin="lower", aspect="auto", cmap=lajolla.reversed())
+cbar = colorbar(img_plot, ax=ax)
+cbar.set_label("NCC (integrated)")
 xlabel(L"\varphi")
 ylabel(L"\eta/g")
 tight_layout()
